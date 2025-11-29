@@ -5,7 +5,7 @@
 
 // LCD configuration for I2C
 // Usually I2C address is 0x27 or 0x3F
-LiquidCrystal_I2C lcd(0x3F, 16, 2); // Change address to 0x3F if not working
+LiquidCrystal_I2C lcd(0x27, 16, 2); // Change address to 0x3F if not working
 
 // Button pin configuration
 const int buttonV = 6;
