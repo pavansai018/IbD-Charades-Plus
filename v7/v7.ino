@@ -1,8 +1,16 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
+#include <SD.h>
 
 // LCD configuration for I2C - Changed to 20x4
 LiquidCrystal_I2C lcd(0x27, 20, 4);
+
+// SD Card - Hardware SPI (Standard pins)
+const int SD_CHIP_SELECT = 4;    // CS pin (your connection)
+// Note: Hardware SPI uses fixed pins:
+// MOSI = Pin 11
+// MISO = Pin 12  
+// SCK = Pin 13
 
 // Button pin configuration
 const int buttonV = 6;
@@ -25,64 +33,44 @@ const int led4 = 2;
 // Game state
 byte gameState = 0; // 0=player menu, 1=theme menu, 2=playing, 3=winner screen, 4=scores screen
 byte selectedPlayers = 1;
-byte currentTheme = 0;
+byte currentThemeIndex = 0;
 unsigned long usedWords = 0;
 byte currentLed = 0;
 byte currentPlayer = 0;
 
-// Scores screen navigation
-byte scoresScreenPage = 0; // 0 = first page, 1 = second page (for 4 players)
+// LED state tracking
+bool ledLit = false;
 
-// Individual mode scores for each player: playerScores[player][mode]
+// Scores screen navigation
+byte scoresScreenPage = 0;
+
+// SD Card theme management
+char themeNames[20][13];  // Store theme filenames (8.3 format + null)
+byte totalThemes = 0;
+char currentWords[20][13]; // Store words for current theme (max 12 chars + null)
+byte totalWordsInTheme = 0;
+
+// Individual mode scores for each player
 int playerScores[4][4] = {
-  {0, 0, 0, 0}, // Player 1: V, A, R, K
-  {0, 0, 0, 0}, // Player 2: V, A, R, K
-  {0, 0, 0, 0}, // Player 3: V, A, R, K
-  {0, 0, 0, 0}  // Player 4: V, A, R, K
+  {0, 0, 0, 0},
+  {0, 0, 0, 0},
+  {0, 0, 0, 0},
+  {0, 0, 0, 0}
 };
 
 // Button state tracking
 unsigned long lastButtonPress = 0;
 const unsigned long debounceDelay = 300;
 
-// Store words in PROGMEM
-const char themes[] PROGMEM = "SPORTS\0LITERATURE\0EDUCATION\0ENTERTAINMENT\0";
-
-const char sportsWords[] PROGMEM = 
-  "FOOTBALL\0BASKETBALL\0TENNIS\0CRICKET\0SWIMMING\0"
-  "ATHLETICS\0VOLLEYBALL\0HOCKEY\0BASEBALL\0GOLF\0"
-  "BOXING\0CYCLING\0SURFING\0SKIING\0ARCHERY\0"
-  "FENCING\0JUDO\0WRESTLING\0ROWING\0SAILING\0";
-
-const char literatureWords[] PROGMEM = 
-  "NOVEL\0POETRY\0DRAMA\0FICTION\0BIOGRAPHY\0"
-  "MYSTERY\0ROMANCE\0FANTASY\0SCIENCE\0HISTORY\0"
-  "PHILOSOPHY\0ESSAY\0COMEDY\0TRAGEDY\0SATIRE\0"
-  "METAPHOR\0ALLEGORY\0SYMBOLISM\0PLOT\0CHARACTER\0";
-
-const char educationWords[] PROGMEM = 
-  "MATH\0SCIENCE\0HISTORY\0GEOGRAPHY\0LANGUAGE\0"
-  "ART\0MUSIC\0PHYSICS\0CHEMISTRY\0BIOLOGY\0"
-  "ALGEBRA\0GEOMETRY\0GRAMMAR\0VOCAB\0RESEARCH\0"
-  "EXPERIMENT\0THEORY\0PRACTICAL\0ANALYSIS\0SYNTHESIS\0";
-
-const char entertainmentWords[] PROGMEM = 
-  "MOVIES\0MUSIC\0THEATER\0DANCE\0TV\0"
-  "GAMING\0COMEDY\0CONCERT\0FESTIVAL\0CARNIVAL\0"
-  "CARTOON\0ANIMATION\0BROADWAY\0OPERA\0BALLET\0"
-  "CINEMA\0DRAMA\0SERIES\0DOC\0REALITY\0";
-
-// Buffer for reading from PROGMEM
-char wordBuffer[20];
-char themeBuffer[20];
-
 void setup() {
   Serial.begin(9600);
   
+  // Initialize LCD
   lcd.init();
   lcd.backlight();
   lcd.clear();
   
+  // Initialize buttons
   pinMode(buttonV, INPUT_PULLUP);
   pinMode(buttonA, INPUT_PULLUP);
   pinMode(buttonR, INPUT_PULLUP);
@@ -92,12 +80,71 @@ void setup() {
   pinMode(buttonRight, INPUT_PULLUP);
   pinMode(buttonSelect, INPUT_PULLUP);
   
+  // Initialize LEDs
   pinMode(led1, OUTPUT);
   pinMode(led2, OUTPUT);
   pinMode(led3, OUTPUT);
   pinMode(led4, OUTPUT);
   
   turnOffAllLEDs();
+  
+  // ===== SD CARD INITIALIZATION (Hardware SPI) =====
+  Serial.println(F("Initializing SD card..."));
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(F("INIT SD CARD..."));
+  
+  bool sdInitialized = false;
+  
+  // Method 1: Try with CS pin 4
+  lcd.setCursor(0, 1);
+  lcd.print(F("Trying CS=4..."));
+  if (SD.begin(SD_CHIP_SELECT)) {
+    sdInitialized = true;
+    Serial.println(F("SD: CS=4 worked"));
+  }
+  
+  // Method 2: Try with CS pin 10 (standard)
+  if (!sdInitialized) {
+    lcd.setCursor(0, 1);
+    lcd.print(F("Trying CS=10..."));
+    if (SD.begin(10)) {
+      sdInitialized = true;
+      Serial.println(F("SD: CS=10 worked"));
+    }
+  }
+  
+  // Method 3: Try with slower speed
+  if (!sdInitialized) {
+    lcd.setCursor(0, 1);
+    lcd.print(F("Trying slow speed..."));
+    // SD library doesn't support speed parameter directly
+    // Just try begin again
+    if (SD.begin(SD_CHIP_SELECT)) {
+      sdInitialized = true;
+      Serial.println(F("SD: Slow speed worked"));
+    }
+  }
+  
+  if (!sdInitialized) {
+    Serial.println(F("SD card initialization failed!"));
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(F("SD CARD ERROR"));
+    lcd.setCursor(0, 1);
+    lcd.print(F("Check:"));
+    lcd.setCursor(0, 2);
+    lcd.print(F("1. 3.3V power"));
+    lcd.setCursor(0, 3);
+    lcd.print(F("2. Card format"));
+    while (1); // Halt if SD card fails
+  }
+  
+  Serial.println(F("SD card initialized successfully."));
+  lcd.clear();
+  
+  // Scan for theme files
+  scanThemes();
   
   randomSeed(analogRead(A5));
   
@@ -120,38 +167,152 @@ void loop() {
   }
 }
 
-// ==================== HELPER FUNCTIONS ====================
-void getStringFromPROGMEM(const char* source, byte index, char* buffer) {
-  const char* ptr = source;
-  for (byte i = 0; i < index; i++) {
-    while (pgm_read_byte(ptr) != 0) ptr++;
-    ptr++;
+// ==================== SD CARD FUNCTIONS ====================
+void scanThemes() {
+  Serial.println(F("Scanning for theme files..."));
+  
+  totalThemes = 0;
+  
+  // Open root directory
+  File root = SD.open("/");
+  if (!root) {
+    Serial.println(F("Failed to open root directory"));
+    return;
   }
   
-  byte i = 0;
-  char c;
-  while ((c = pgm_read_byte(ptr)) != 0 && i < 19) {
-    buffer[i++] = c;
-    ptr++;
+  while (true) {
+    File entry = root.openNextFile();
+    if (!entry) {
+      // No more files
+      break;
+    }
+    
+    if (!entry.isDirectory()) {
+      // Use name() instead of getName()
+      char* filename = entry.name();
+      
+      // Check if file is a CSV file
+      if (filename) {
+        int len = strlen(filename);
+        if (len >= 4) {
+          // Extract extension
+          char ext[5];
+          strcpy(ext, filename + len - 4);
+          
+          // Convert extension to uppercase for comparison
+          for (int i = 0; i < 4; i++) {
+            ext[i] = toupper(ext[i]);
+          }
+          
+          if (strcmp(ext, ".CSV") == 0) {
+            if (totalThemes < 20) {
+              // Remove .csv extension (4 characters)
+              strncpy(themeNames[totalThemes], filename, len - 4);
+              themeNames[totalThemes][len - 4] = '\0'; // Null terminate
+              
+              // Convert theme name to uppercase for display
+              for (int i = 0; themeNames[totalThemes][i]; i++) {
+                themeNames[totalThemes][i] = toupper(themeNames[totalThemes][i]);
+              }
+              
+              Serial.print(F("Found theme: "));
+              Serial.println(themeNames[totalThemes]);
+              totalThemes++;
+            }
+          }
+        }
+      }
+    }
+    entry.close();
   }
-  buffer[i] = '\0';
-}
-
-void getWord(byte theme, byte index, char* buffer) {
-  const char* wordList;
-  switch(theme) {
-    case 0: wordList = sportsWords; break;
-    case 1: wordList = literatureWords; break;
-    case 2: wordList = educationWords; break;
-    case 3: wordList = entertainmentWords; break;
+  
+  root.close();
+  
+  if (totalThemes == 0) {
+    Serial.println(F("No theme files found!"));
+  } else {
+    Serial.print(F("Total themes found: "));
+    Serial.println(totalThemes);
   }
-  getStringFromPROGMEM(wordList, index, buffer);
 }
 
-void getThemeName(byte index, char* buffer) {
-  getStringFromPROGMEM(themes, index, buffer);
+bool loadTheme(byte themeIndex) {
+  if (themeIndex >= totalThemes) {
+    Serial.println(F("Invalid theme index"));
+    return false;
+  }
+  
+  // Create filename with .csv extension
+  char filename[20];
+  strcpy(filename, themeNames[themeIndex]);
+  strcat(filename, ".CSV");
+  
+  Serial.print(F("Loading theme: "));
+  Serial.println(filename);
+  
+  File themeFile = SD.open(filename);
+  if (!themeFile) {
+    Serial.println(F("Failed to open theme file"));
+    return false;
+  }
+  
+  // Read words from file
+  totalWordsInTheme = 0;
+  char lineBuffer[20];
+  int lineIndex = 0;
+  
+  while (themeFile.available() && totalWordsInTheme < 20) {
+    char c = themeFile.read();
+    
+    if (c == '\n' || c == '\r') {
+      if (lineIndex > 0) {
+        lineBuffer[lineIndex] = '\0';
+        
+        // Convert to uppercase
+        for (int i = 0; lineBuffer[i]; i++) {
+          lineBuffer[i] = toupper(lineBuffer[i]);
+        }
+        
+        // Trim trailing spaces
+        while (lineIndex > 0 && lineBuffer[lineIndex-1] == ' ') {
+          lineBuffer[--lineIndex] = '\0';
+        }
+        
+        if (lineIndex > 0) {  // Non-empty line
+          strcpy(currentWords[totalWordsInTheme], lineBuffer);
+          totalWordsInTheme++;
+        }
+        lineIndex = 0;
+      }
+    } else if (lineIndex < 19) {
+      lineBuffer[lineIndex++] = c;
+    }
+  }
+  
+  // Check last line if file doesn't end with newline
+  if (lineIndex > 0 && totalWordsInTheme < 20) {
+    lineBuffer[lineIndex] = '\0';
+    for (int i = 0; lineBuffer[i]; i++) {
+      lineBuffer[i] = toupper(lineBuffer[i]);
+    }
+    strcpy(currentWords[totalWordsInTheme], lineBuffer);
+    totalWordsInTheme++;
+  }
+  
+  themeFile.close();
+  
+  Serial.print(F("Loaded "));
+  Serial.print(totalWordsInTheme);
+  Serial.println(F(" words"));
+  
+  if (totalWordsInTheme < 20) {
+    Serial.println(F("WARNING: Theme has less than 20 words!"));
+  }
+  
+  return true;
 }
 
+// ==================== HELPER FUNCTIONS ====================
 void turnOffAllLEDs() {
   digitalWrite(led1, LOW);
   digitalWrite(led2, LOW);
@@ -171,7 +332,7 @@ byte countBits(unsigned long n) {
 // ==================== PLAYER MENU ====================
 void displayPlayerMenu() {
   gameState = 0;
-  scoresScreenPage = 0; // Reset scores screen page
+  scoresScreenPage = 0;
   turnOffAllLEDs();
   lcd.clear();
   lcd.setCursor(0, 0);
@@ -212,7 +373,7 @@ void handlePlayerMenu() {
   
   if (digitalRead(buttonSelect) == LOW && millis() - lastButtonPress > debounceDelay) {
     lastButtonPress = millis();
-    currentTheme = 0;
+    currentThemeIndex = 0;
     displayThemeMenu();
     while(digitalRead(buttonSelect) == LOW) delay(10);
   }
@@ -225,9 +386,24 @@ void displayThemeMenu() {
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print(F("SELECT THEME"));
-  getThemeName(currentTheme, themeBuffer);
+  
+  if (totalThemes == 0) {
+    lcd.setCursor(0, 1);
+    lcd.print(F("NO THEMES FOUND"));
+    lcd.setCursor(0, 2);
+    lcd.print(F("Add CSV files to"));
+    lcd.setCursor(0, 3);
+    lcd.print(F("SD card root"));
+    return;
+  }
+  
+  // Display current theme name
   lcd.setCursor(0, 1);
-  lcd.print(themeBuffer);
+  lcd.print(F("                    "));
+  lcd.setCursor(0, 1);
+  lcd.print(themeNames[currentThemeIndex]);
+  
+  // Show theme count
   lcd.setCursor(0, 2);
   lcd.print(F("< PREV    NEXT >"));
   lcd.setCursor(0, 3);
@@ -235,44 +411,80 @@ void displayThemeMenu() {
 }
 
 void handleThemeMenu() {
+  if (totalThemes == 0) {
+    // No themes available
+    if (digitalRead(buttonSelect) == LOW && millis() - lastButtonPress > debounceDelay) {
+      lastButtonPress = millis();
+      displayPlayerMenu();
+      while(digitalRead(buttonSelect) == LOW) delay(10);
+    }
+    return;
+  }
+  
   if (digitalRead(buttonLeft) == LOW && millis() - lastButtonPress > debounceDelay) {
     lastButtonPress = millis();
-    currentTheme = (currentTheme - 1 + 4) % 4;
-    getThemeName(currentTheme, themeBuffer);
+    currentThemeIndex = (currentThemeIndex - 1 + totalThemes) % totalThemes;
     lcd.setCursor(0, 1);
     lcd.print(F("                    "));
     lcd.setCursor(0, 1);
-    lcd.print(themeBuffer);
+    lcd.print(themeNames[currentThemeIndex]);
     Serial.print(F("Theme: "));
-    Serial.println(themeBuffer);
+    Serial.println(themeNames[currentThemeIndex]);
     while(digitalRead(buttonLeft) == LOW) delay(10);
   }
   
   if (digitalRead(buttonRight) == LOW && millis() - lastButtonPress > debounceDelay) {
     lastButtonPress = millis();
-    currentTheme = (currentTheme + 1) % 4;
-    getThemeName(currentTheme, themeBuffer);
+    currentThemeIndex = (currentThemeIndex + 1) % totalThemes;
     lcd.setCursor(0, 1);
     lcd.print(F("                    "));
     lcd.setCursor(0, 1);
-    lcd.print(themeBuffer);
+    lcd.print(themeNames[currentThemeIndex]);
     Serial.print(F("Theme: "));
-    Serial.println(themeBuffer);
+    Serial.println(themeNames[currentThemeIndex]);
     while(digitalRead(buttonRight) == LOW) delay(10);
   }
   
   if (digitalRead(buttonSelect) == LOW && millis() - lastButtonPress > debounceDelay) {
     lastButtonPress = millis();
-    // Reset all scores for new game
-    for (byte player = 0; player < 4; player++) {
-      for (byte mode = 0; mode < 4; mode++) {
-        playerScores[player][mode] = 0;
+    
+    // Load selected theme
+    if (loadTheme(currentThemeIndex)) {
+      if (totalWordsInTheme >= 20) {
+        // Reset all scores for new game
+        for (byte player = 0; player < 4; player++) {
+          for (byte mode = 0; mode < 4; mode++) {
+            playerScores[player][mode] = 0;
+          }
+        }
+        usedWords = 0;
+        currentPlayer = 0;
+        gameState = 2;
+        displayNextWord();
+      } else {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print(F("INSUFFICIENT WORDS"));
+        lcd.setCursor(0, 1);
+        lcd.print(F("Need 20, found:"));
+        lcd.setCursor(0, 2);
+        lcd.print(totalWordsInTheme);
+        lcd.setCursor(0, 3);
+        lcd.print(F("Press SEL to go back"));
+        
+        // Wait for select to go back
+        while(true) {
+          if (digitalRead(buttonSelect) == LOW && millis() - lastButtonPress > debounceDelay) {
+            lastButtonPress = millis();
+            displayThemeMenu();
+            while(digitalRead(buttonSelect) == LOW) delay(10);
+            break;
+          }
+          delay(50);
+        }
       }
     }
-    usedWords = 0;
-    currentPlayer = 0;
-    gameState = 2;
-    displayNextWord();
+    
     while(digitalRead(buttonSelect) == LOW) delay(10);
   }
 }
@@ -281,33 +493,20 @@ void handleThemeMenu() {
 void displayNextWord() {
   lcd.clear();
   
-  // Get random unused word (0-19)
+  // Get random unused word
   byte wordIndex;
   int attempts = 0;
   do {
-    wordIndex = random(20);
+    wordIndex = random(totalWordsInTheme);
     attempts++;
     if (attempts > 100) {
-      usedWords = 0;
-      wordIndex = random(20);
+      usedWords = 0; // Reset if we can't find unused word
+      wordIndex = random(totalWordsInTheme);
       break;
     }
   } while ((usedWords >> wordIndex) & 1);
   
   usedWords |= (1UL << wordIndex);
-  
-  // Get word from PROGMEM
-  getWord(currentTheme, wordIndex, wordBuffer);
-  
-  // Light random LED (0-3)
-  currentLed = random(4);
-  turnOffAllLEDs();
-  switch(currentLed) {
-    case 0: digitalWrite(led1, HIGH); break;
-    case 1: digitalWrite(led2, HIGH); break;
-    case 2: digitalWrite(led3, HIGH); break;
-    case 3: digitalWrite(led4, HIGH); break;
-  }
   
   // Display on LCD
   lcd.setCursor(0, 0);
@@ -319,14 +518,31 @@ void displayNextWord() {
   lcd.setCursor(0, 1);
   lcd.print(F("WORD "));
   lcd.print(countBits(usedWords));
-  lcd.print(F(" OF 20"));
+  lcd.print(F(" OF "));
+  lcd.print(totalWordsInTheme);
   
   // Center the word
-  int startPos = (20 - strlen(wordBuffer)) / 2;
+  int wordLength = strlen(currentWords[wordIndex]);
+  int startPos = (20 - wordLength) / 2;
   lcd.setCursor(startPos, 2);
-  lcd.print(wordBuffer);
+  lcd.print(currentWords[wordIndex]);
   
+  // Clear the button prompt line - it will be filled in updateButtonPrompt()
   lcd.setCursor(0, 3);
+  lcd.print(F("                    "));
+  
+  Serial.println(F("========================="));
+  Serial.print(F("Player "));
+  Serial.print(currentPlayer + 1);
+  Serial.print(F(" turn | Word: "));
+  Serial.print(currentWords[wordIndex]);
+}
+
+void updateButtonPrompt() {
+  lcd.setCursor(0, 3);
+  lcd.print(F("                    ")); // Clear the line
+  lcd.setCursor(0, 3);
+  
   if (currentLed == 0) {
     lcd.print(F("Answer by V mode"));
   } else if (currentLed == 1) {
@@ -337,11 +553,6 @@ void displayNextWord() {
     lcd.print(F("Answer by K mode"));
   }
   
-  Serial.println(F("========================="));
-  Serial.print(F("Player "));
-  Serial.print(currentPlayer + 1);
-  Serial.print(F(" turn | Word: "));
-  Serial.print(wordBuffer);
   Serial.print(F(" | LED "));
   Serial.print(currentLed + 1);
   Serial.print(F(" - Answer by "));
@@ -349,6 +560,22 @@ void displayNextWord() {
 }
 
 void handleGame() {
+  // Light random LED at the start of each turn
+  if (!ledLit) {
+    currentLed = random(4);
+    turnOffAllLEDs();
+    switch(currentLed) {
+      case 0: digitalWrite(led1, HIGH); break;
+      case 1: digitalWrite(led2, HIGH); break;
+      case 2: digitalWrite(led3, HIGH); break;
+      case 3: digitalWrite(led4, HIGH); break;
+    }
+    ledLit = true;
+    
+    // Update the button prompt AFTER setting the LED
+    updateButtonPrompt();
+  }
+  
   checkButton(buttonV, 0);
   checkButton(buttonA, 1);
   checkButton(buttonR, 2);
@@ -365,12 +592,8 @@ void checkButton(int buttonPin, byte buttonType) {
     Serial.println(F(" pressed"));
     
     // Check if this is the current player's turn
-    // Only current player can score on their turn
     if (buttonType == currentLed) {
-      // Correct button pressed AND correct mode
-      // Increment the score for current player in the current mode
       playerScores[currentPlayer][buttonType]++;
-      
       Serial.print(F(">>> Player "));
       Serial.print(currentPlayer + 1);
       Serial.print(F(" scores in "));
@@ -382,25 +605,16 @@ void checkButton(int buttonPin, byte buttonType) {
       Serial.println(F(">>> WRONG mode! No score."));
     }
     
-    // Display current player's scores for debugging
-    Serial.print(F("Player "));
-    Serial.print(currentPlayer + 1);
-    Serial.print(F(" scores - V:"));
-    Serial.print(playerScores[currentPlayer][0]);
-    Serial.print(F(" A:"));
-    Serial.print(playerScores[currentPlayer][1]);
-    Serial.print(F(" R:"));
-    Serial.print(playerScores[currentPlayer][2]);
-    Serial.print(F(" K:"));
-    Serial.println(playerScores[currentPlayer][3]);
-    
     // Move to next player
     currentPlayer = (currentPlayer + 1) % selectedPlayers;
     
-    if (countBits(usedWords) >= 20) {
+    if (countBits(usedWords) >= totalWordsInTheme || countBits(usedWords) >= 20) {
       gameState = 3;
       displayWinnerScreen();
     } else {
+      // Reset LED flag for next word
+      ledLit = false;
+      turnOffAllLEDs(); // Turn off LEDs before next word
       displayNextWord();
     }
     
@@ -415,10 +629,13 @@ void checkSkipButton() {
     
     currentPlayer = (currentPlayer + 1) % selectedPlayers;
     
-    if (countBits(usedWords) >= 20) {
+    if (countBits(usedWords) >= totalWordsInTheme || countBits(usedWords) >= 20) {
       gameState = 3;
       displayWinnerScreen();
     } else {
+      // Reset LED flag for next word
+      ledLit = false;
+      turnOffAllLEDs(); // Turn off LEDs before next word
       displayNextWord();
     }
     
@@ -430,13 +647,13 @@ void checkSkipButton() {
 void displayWinnerScreen() {
   turnOffAllLEDs();
   gameState = 3;
-  scoresScreenPage = 0; // Reset to first page
+  scoresScreenPage = 0;
   
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print(F("    GAME OVER"));
   
-  // Calculate total scores for each player
+  // Calculate total scores
   int totalScores[4] = {0, 0, 0, 0};
   for (byte player = 0; player < selectedPlayers; player++) {
     for (byte mode = 0; mode < 4; mode++) {
@@ -477,14 +694,6 @@ void displayWinnerScreen() {
   
   lcd.setCursor(0, 3);
   lcd.print(F("Press SEL for scores"));
-  
-  Serial.println(F("=== GAME OVER ==="));
-  if (tieCount > 1) {
-    Serial.println(F("TIE GAME!"));
-  } else {
-    Serial.print(F("WINNER: Player "));
-    Serial.println(winner + 1);
-  }
 }
 
 void handleWinnerScreen() {
@@ -501,7 +710,6 @@ void displayScoresScreen() {
   lcd.clear();
   lcd.setCursor(0, 0);
   
-  // Show page indicator if multiple pages
   if (selectedPlayers > 2) {
     lcd.print(F("SCORES "));
     if (selectedPlayers == 3) {
@@ -515,7 +723,6 @@ void displayScoresScreen() {
     lcd.print(F("INDIVIDUAL SCORES"));
   }
   
-  // Display 2 players per screen (rows 1 and 2)
   byte startPlayer = scoresScreenPage * 2;
   byte playersOnThisScreen = min(2, selectedPlayers - startPlayer);
   
@@ -523,13 +730,9 @@ void displayScoresScreen() {
     byte player = startPlayer + i;
     lcd.setCursor(0, 1 + i);
     
-    // Player number
     lcd.print(F("P"));
     lcd.print(player + 1);
-    lcd.print(F(": "));
-    
-    // Mode scores
-    lcd.print(F("V"));
+    lcd.print(F(": V"));
     lcd.print(playerScores[player][0]);
     lcd.print(F(" A"));
     lcd.print(playerScores[player][1]);
@@ -538,41 +741,32 @@ void displayScoresScreen() {
     lcd.print(F(" K"));
     lcd.print(playerScores[player][3]);
     
-    // Total score
     int total = playerScores[player][0] + playerScores[player][1] + 
                 playerScores[player][2] + playerScores[player][3];
     lcd.print(F(" T:"));
     lcd.print(total);
   }
   
-  // Navigation instructions on row 4
   lcd.setCursor(0, 3);
   
   if (selectedPlayers <= 2) {
-    // 1-2 players: Only one screen
     lcd.print(F("SEL:Menu"));
   } else if (selectedPlayers == 3) {
-    // 3 players: Only one screen (shows P1-P2, row 3 empty)
     lcd.print(F("SEL:Menu"));
   } else if (selectedPlayers == 4) {
-    // 4 players: Two screens
     if (scoresScreenPage == 0) {
-      // First screen: Show P1-P2
       lcd.print(F("<->:More  SEL:Menu"));
     } else {
-      // Second screen: Show P3-P4  
       lcd.print(F("<->:Back  SEL:Menu"));
     }
   }
 }
 
 void handleScoresScreen() {
-  // Check for navigation buttons
   if (digitalRead(buttonLeft) == LOW && millis() - lastButtonPress > debounceDelay) {
     lastButtonPress = millis();
     
     if (selectedPlayers == 4) {
-      // Cycle backward through pages
       scoresScreenPage = (scoresScreenPage - 1 + 2) % 2;
       displayScoresScreen();
     }
@@ -584,7 +778,6 @@ void handleScoresScreen() {
     lastButtonPress = millis();
     
     if (selectedPlayers == 4) {
-      // Cycle forward through pages
       scoresScreenPage = (scoresScreenPage + 1) % 2;
       displayScoresScreen();
     }
@@ -592,10 +785,9 @@ void handleScoresScreen() {
     while(digitalRead(buttonRight) == LOW) delay(10);
   }
   
-  // Check for return to menu
   if (digitalRead(buttonSelect) == LOW && millis() - lastButtonPress > debounceDelay) {
     lastButtonPress = millis();
-    scoresScreenPage = 0; // Reset page
+    scoresScreenPage = 0;
     displayPlayerMenu();
     while(digitalRead(buttonSelect) == LOW) delay(10);
   }
